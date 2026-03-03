@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="介護記録AI">
+<title>介護記録AI</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; overflow:hidden; }
+  body { font-family:'Hiragino Sans','Noto Sans JP',sans-serif; background:linear-gradient(160deg,#fdf6ef 0%,#f7ede2 40%,#f0e6d8 100%); }
+  input, textarea, button { font-family:inherit; -webkit-appearance:none; }
+  @keyframes blink{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+  @keyframes recording{0%,100%{box-shadow:0 0 8px rgba(231,76,60,0.3)}50%{box-shadow:0 0 20px rgba(231,76,60,0.6)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const USERS = [
+  { username: "admin", password: "admin123", displayName: "管理 太郎" },
+  { username: "tanaka", password: "care1234", displayName: "田中 太郎" },
+  { username: "suzuki", password: "care1234", displayName: "鈴木 花子" },
+  { username: "sato", password: "care1234", displayName: "佐藤 一郎" },
+];
+
+const fmtDT = (ts) => {
+  const d = new Date(ts);
+  return (d.getMonth()+1) + "/" + d.getDate() + " " + String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
+};
+
+const fmtFullDT = (ts) => {
+  const d = new Date(ts);
+  return d.getFullYear() + "/" + (d.getMonth()+1) + "/" + d.getDate() + " " + String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
+};
+
+const getDateKey = (dt) => {
+  const d = new Date(dt);
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+};
+
+const DAY_LABELS = ["今日","昨日","一昨日"];
+const getDateSub = (dt) => { const d = new Date(dt); return (d.getMonth()+1) + "月" + d.getDate() + "日"; };
+
+const stripMd = (t) => t.replace(/[*#~]/g, "").replace(/`/g, "").trim();
+
+const genRecord = async (input, recName) => {
+  const now = new Date().toLocaleString("ja-JP");
+  let subject = "利用者様";
+  const fp = input.split(/[、,，\n]/)[0].trim();
+  if (fp.length <= 10 && !/実施|確認|観察|誘導|介助|食事|入浴|排泄|バイタル|夜間|午前|午後|昼食|夕食|朝食/.test(fp)) {
+    subject = fp.replace(/さん$/, "").replace(/さま$/, "").replace(/氏$/, "").trim() + "様";
+  }
+  const sysText = [
+    "あなたは介護施設の記録作成AIです。以下のルールに従って介護記録を作成してください。",
+    "",
+    "【出力フォーマット】",
+    "記録日時: " + now,
+    "記録者: " + recName,
+    "利用者: " + subject,
+    "",
+    "(本文)",
+    "",
+    "【本文のルール】",
+    "- 入力されたメモや音声文字起こしを専門的な介護記録の文章に変換する",
+    "- 項目分け(【S】【O】【A】【P】等)は一切使わず自然な流れの文章で書く",
+    "- 利用者の行動は「〜された」「〜と話される」のように尊敬表現を使う",
+    "- スタッフの対応は「〜した」「〜を行った」のように常体で書く",
+    "- 観察事実は「〜が見られた」「〜の印象あり」のように客観的に書く",
+    "- 入力が簡潔なメモでも前後の文脈を補って自然な文章にする",
+    "- 余計な前置きや挨拶は不要。記録本文のみを出力",
+    "- マークダウン記号は一切使わない",
+  ].join("\n");
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5-20250514",
+        max_tokens: 1000,
+        system: sysText,
+        messages: [{ role: "user", content: "以下の内容を介護記録に変換してください。\n\n" + input }],
+      })
+    });
+    const data = await response.json();
+    const text = data.content.map((item) => item.type === "text" ? item.text : "").filter(Boolean).join("\n");
+    return stripMd(text);
+  } catch (err) {
+    console.error("API Error:", err);
+    return "記録日時: " + now + "\n記録者: " + recName + "\n利用者: " + subject + "\n\n" + input + "\n\n※ AI生成に失敗しました。入力内容をそのまま表示しています。";
+  }
+};
+
+const exportMsgs = (msgs, label, recName) => {
+  let t = "========================================\n";
+  t += "  " + label + "\n";
+  t += "  記録者: " + recName + "\n";
+  t += "  出力日時: " + new Date().toLocaleString("ja-JP") + "\n";
+  t += "========================================\n\n";
+  msgs.forEach((m) => {
+    const role = m.role === "user" ? "[入力]" : "[AI記録]";
+    const ed = m.editedAt ? " (編集済)" : "";
+    t += role + " " + fmtFullDT(m.timestamp) + ed + "\n";
+    t += "----------------------------------------\n";
+    t += m.text + "\n\n";
+  });
+  return t;
+};
+
+function CareRecordAI() {
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [loginUser, setLoginUser] = useState("");
+  const [loginPass, setLoginPass] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [currentUser, setCurrentUser] = useState(null);
+  const [allMsgs, setAllMsgs] = useState({});
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [selDate, setSelDate] = useState(getDateKey(new Date()));
+  const [editId, setEditId] = useState(null);
+  const [editBuf, setEditBuf] = useState("");
+  const [showExport, setShowExport] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [interim, setInterim] = useState("");
+  const [hasSR, setHasSR] = useState(false);
+
+  const endRef = useRef(null);
+  const taRef = useRef(null);
+  const expRef = useRef(null);
+  const recognitionRef = useRef(null);
+
+  const todayKey = getDateKey(new Date());
+  const tabs = [0,1,2].map((n) => {
+    const d = new Date(); d.setDate(d.getDate() - n);
+    return { key: getDateKey(d), label: DAY_LABELS[n], sub: getDateSub(d) };
+  });
+  const curMsgs = allMsgs[selDate] || [];
+
+  const scroll = useCallback(() => {
+    setTimeout(() => { if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth" }); }, 120);
+  }, []);
+
+  useEffect(() => { scroll(); }, [curMsgs.length, scroll]);
+
+  useEffect(() => {
+    if (taRef.current) { taRef.current.style.height = "auto"; taRef.current.style.height = Math.min(taRef.current.scrollHeight, 180) + "px"; }
+  }, [input]);
+
+  useEffect(() => {
+    const h = (e) => { if (expRef.current && !expRef.current.contains(e.target)) setShowExport(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  // Speech Recognition (works on Safari 14.1+ / iOS 14.5+)
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setHasSR(false); return; }
+    setHasSR(true);
+    const rec = new SR();
+    rec.lang = "ja-JP";
+    rec.continuous = false; // iOS Safari works better with continuous=false
+    rec.interimResults = true;
+    let finalText = "";
+    let timer = null;
+
+    rec.onresult = (event) => {
+      let fin = "", tmp = "";
+      for (let i = 0; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript;
+        if (event.results[i].isFinal) fin += t; else tmp += t;
+      }
+      if (fin) finalText = fin;
+      setInterim(tmp);
+      setInput(finalText + tmp);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { try { rec.stop(); } catch(e){} }, 2500);
+    };
+
+    rec.onend = () => {
+      setIsListening(false);
+      setInterim("");
+      if (timer) clearTimeout(timer);
+      if (finalText.trim()) {
+        setInput(finalText.trim());
+        setTimeout(() => document.dispatchEvent(new CustomEvent("voiceSend")), 200);
+      }
+      finalText = "";
+    };
+
+    rec.onerror = (e) => {
+      console.error("Speech error:", e.error);
+      setIsListening(false);
+      setInterim("");
+      finalText = "";
+    };
+
+    recognitionRef.current = rec;
+    return () => { try { rec.abort(); } catch(e){} };
+  }, []);
+
+  useEffect(() => {
+    const h = () => setTimeout(() => { const b = document.getElementById("care-send-btn"); if (b) b.click(); }, 200);
+    document.addEventListener("voiceSend", h);
+    return () => document.removeEventListener("voiceSend", h);
+  }, []);
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) { alert("このブラウザは音声認識に対応していません。\niOS 14.5以降のSafariで利用可能です。"); return; }
+    if (isListening) {
+      try { recognitionRef.current.stop(); } catch(e){}
+    } else {
+      setInput(""); setInterim("");
+      try { recognitionRef.current.start(); setIsListening(true); } catch(e) { console.error(e); alert("マイクへのアクセスが拒否されました。\n設定 > Safari > マイク を確認してください。"); }
+    }
+  };
+
+  const doLogin = () => {
+    const found = USERS.find((u) => u.username === loginUser && u.password === loginPass);
+    if (found) { setCurrentUser(found); setIsLoggedIn(true); setLoginError(""); }
+    else { setLoginError("ユーザー名またはパスワードが正しくありません"); }
+  };
+  const doLogout = () => { setIsLoggedIn(false); setCurrentUser(null); setLoginUser(""); setLoginPass(""); setAllMsgs({}); };
+
+  const doSend = async () => {
+    if (!input.trim() || loading) return;
+    const now = Date.now();
+    const um = { id: "u-" + now, role: "user", text: input.trim(), timestamp: now };
+    setAllMsgs((p) => ({ ...p, [todayKey]: [...(p[todayKey] || []), um] }));
+    const txt = input.trim();
+    setInput(""); setLoading(true); setSelDate(todayKey);
+    try {
+      const raw = await genRecord(txt, currentUser.displayName);
+      const am = { id: "a-" + Date.now(), role: "ai", text: raw, timestamp: Date.now() };
+      setAllMsgs((p) => ({ ...p, [todayKey]: [...(p[todayKey] || []), am] }));
+    } catch(err) {
+      const em = { id: "e-" + Date.now(), role: "ai", text: "エラーが発生しました。もう一度お試しください。", timestamp: Date.now() };
+      setAllMsgs((p) => ({ ...p, [todayKey]: [...(p[todayKey] || []), em] }));
+    }
+    setLoading(false);
+  };
+
+  const startEdit = (m) => { setEditId(m.id); setEditBuf(m.text); };
+  const saveEdit = (id) => {
+    setAllMsgs((p) => {
+      const n = { ...p };
+      Object.keys(n).forEach((k) => { n[k] = n[k].map((m) => m.id === id ? { ...m, text: editBuf, editedAt: Date.now() } : m); });
+      return n;
+    });
+    setEditId(null); setEditBuf("");
+  };
+
+  const doExportText = () => {
+    const tab = tabs.find((t) => t.key === selDate);
+    const text = exportMsgs(curMsgs, tab.label + " (" + tab.sub + ")", currentUser.displayName);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "介護記録_" + selDate + ".txt"; a.click();
+    setShowExport(false);
+  };
+  const doPrint = () => {
+    const tab = tabs.find((t) => t.key === selDate);
+    const text = exportMsgs(curMsgs, tab.label + " (" + tab.sub + ")", currentUser.displayName);
+    const w = window.open("", "_blank");
+    if (w) {
+      w.document.write("<html><head><title>介護記録</title><style>body{font-family:sans-serif;padding:40px;line-height:1.8;white-space:pre-wrap;font-size:14px;}</style></head><body>" + text.replace(/\n/g, "<br>") + "</body></html>");
+      w.document.close(); w.print();
+    }
+    setShowExport(false);
+  };
+
+  const onKey = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } };
+
+  // ====== LOGIN ======
+  if (!isLoggedIn) {
+    return (
+      <div style={{ minHeight:"100vh", minHeight:"100dvh", display:"flex", alignItems:"center", justifyContent:"center", padding:"20px" }}>
+        <div style={{ background:"#fff", borderRadius:"24px", padding:"40px 32px", maxWidth:"400px", width:"100%", boxShadow:"0 8px 40px rgba(180,140,100,0.12)", textAlign:"center" }}>
+          <div style={{ fontSize:"48px", marginBottom:"12px" }}>✏️</div>
+          <h1 style={{ fontSize:"22px", fontWeight:700, color:"#5a4a3a", marginBottom:"4px" }}>介護記録AI</h1>
+          <p style={{ fontSize:"13px", color:"#a0907e", marginBottom:"28px" }}>ログインしてください</p>
+          {loginError && <div style={{ background:"#fef2f2", border:"1px solid #fca5a5", color:"#dc2626", borderRadius:"10px", padding:"10px 14px", fontSize:"13px", marginBottom:"16px" }}>{loginError}</div>}
+          <div style={{ textAlign:"left", marginBottom:"14px" }}>
+            <label style={{ display:"block", fontSize:"13px", color:"#7a6a5a", marginBottom:"6px", fontWeight:500 }}>ユーザー名</label>
+            <input type="text" value={loginUser} onChange={(e) => setLoginUser(e.target.value)} onKeyDown={(e) => { if(e.key==="Enter") doLogin(); }} placeholder="ユーザー名を入力" autoCapitalize="off" autoCorrect="off" style={{ width:"100%", padding:"12px 14px", borderRadius:"10px", border:"2px solid #e8ddd0", fontSize:"16px", outline:"none", boxSizing:"border-box", background:"#faf7f3", color:"#4a3a2a" }} />
+          </div>
+          <div style={{ textAlign:"left", marginBottom:"24px" }}>
+            <label style={{ display:"block", fontSize:"13px", color:"#7a6a5a", marginBottom:"6px", fontWeight:500 }}>パスワード</label>
+            <input type="password" value={loginPass} onChange={(e) => setLoginPass(e.target.value)} onKeyDown={(e) => { if(e.key==="Enter") doLogin(); }} placeholder="パスワードを入力" style={{ width:"100%", padding:"12px 14px", borderRadius:"10px", border:"2px solid #e8ddd0", fontSize:"16px", outline:"none", boxSizing:"border-box", background:"#faf7f3", color:"#4a3a2a" }} />
+          </div>
+          <button onClick={doLogin} disabled={!loginUser.trim()||!loginPass.trim()} style={{ width:"100%", padding:"14px", borderRadius:"12px", border:"none", background: loginUser.trim()&&loginPass.trim() ? "linear-gradient(135deg,#c4956a,#b07d52)" : "#d8cfc4", color:"#fff", fontSize:"16px", fontWeight:600, cursor:"pointer" }}>ログイン</button>
+          <div style={{ marginTop:"20px", fontSize:"11px", color:"#b0a090", lineHeight:1.8 }}>テストアカウント<br/>admin / admin123 ｜ tanaka / care1234<br/>suzuki / care1234 ｜ sato / care1234</div>
+        </div>
+      </div>
+    );
+  }
+
+  // ====== MAIN ======
+  return (
+    <div style={{ height:"100vh", height:"100dvh", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+      {/* HEADER */}
+      <header style={{ background:"rgba(255,255,255,0.92)", backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)", borderBottom:"1px solid rgba(200,180,160,0.2)", padding:"10px 16px", flexShrink:0, paddingTop:"max(10px, env(safe-area-inset-top))" }}>
+        <div style={{ maxWidth:"800px", margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"8px" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+            <span style={{ fontSize:"24px" }}>✏️</span>
+            <div>
+              <h1 style={{ fontSize:"16px", fontWeight:700, color:"#5a4a3a", margin:0 }}>介護記録AI</h1>
+              <span style={{ fontSize:"10px", color:"#a0907e" }}>ケアアシスタント</span>
+            </div>
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:"6px" }}>
+            <div style={{ position:"relative" }} ref={expRef}>
+              <button onClick={() => setShowExport(!showExport)} disabled={curMsgs.length===0} style={{ padding:"5px 10px", borderRadius:"8px", border:"1px solid #d8cfc4", background:"#fff", fontSize:"11px", color: curMsgs.length>0 ? "#7a6a5a" : "#c0b8ae", cursor:"pointer" }}>出力</button>
+              {showExport && (
+                <div style={{ position:"absolute", top:"100%", right:0, marginTop:"6px", background:"#fff", borderRadius:"12px", boxShadow:"0 4px 24px rgba(0,0,0,0.12)", border:"1px solid #e8ddd0", overflow:"hidden", zIndex:200, minWidth:"140px" }}>
+                  <button onClick={doExportText} style={{ display:"block", width:"100%", padding:"12px 16px", border:"none", background:"none", textAlign:"left", fontSize:"13px", color:"#5a4a3a", cursor:"pointer" }}>テキスト保存</button>
+                  <div style={{ height:"1px", background:"#f0e8de" }}/>
+                  <button onClick={doPrint} style={{ display:"block", width:"100%", padding:"12px 16px", border:"none", background:"none", textAlign:"left", fontSize:"13px", color:"#5a4a3a", cursor:"pointer" }}>印刷</button>
+                </div>
+              )}
+            </div>
+            <div style={{ fontSize:"11px", color:"#8a7a6a", background:"rgba(200,180,160,0.15)", padding:"3px 10px", borderRadius:"20px", maxWidth:"100px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{currentUser.displayName}</div>
+            <button onClick={doLogout} style={{ padding:"5px 8px", borderRadius:"8px", border:"1px solid #d8cfc4", background:"#fff", fontSize:"10px", color:"#a09080", cursor:"pointer" }}>ログアウト</button>
+          </div>
+        </div>
+      </header>
+
+      {/* DATE TABS */}
+      <div style={{ background:"rgba(255,255,255,0.6)", borderBottom:"1px solid rgba(200,180,160,0.15)", padding:"6px 16px", flexShrink:0 }}>
+        <div style={{ maxWidth:"800px", margin:"0 auto", display:"flex", gap:"6px" }}>
+          {tabs.map((tab) => {
+            const act = selDate === tab.key;
+            const cnt = (allMsgs[tab.key]||[]).filter((m) => m.role==="ai").length;
+            return (
+              <button key={tab.key} onClick={() => setSelDate(tab.key)} style={{ flex:1, padding:"8px 6px", borderRadius:"10px", border: act ? "2px solid #c4956a" : "2px solid transparent", background: act ? "#fff" : "rgba(255,255,255,0.5)", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:"1px", boxShadow: act ? "0 2px 8px rgba(196,149,106,0.15)" : "none" }}>
+                <span style={{ fontSize:"13px", fontWeight: act ? 700 : 500, color: act ? "#b07d52" : "#8a7a6a" }}>{tab.label}</span>
+                <span style={{ fontSize:"10px", color: act ? "#b07d52" : "#a09080" }}>{tab.sub}</span>
+                {cnt > 0 && <span style={{ fontSize:"9px", color:"#fff", background: act ? "#c4956a" : "#bfb0a0", borderRadius:"10px", padding:"1px 7px", marginTop:"1px" }}>{cnt}件</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* MESSAGES */}
+      <div style={{ flex:1, overflowY:"auto", WebkitOverflowScrolling:"touch", padding:"16px" }}>
+        <div style={{ maxWidth:"800px", margin:"0 auto" }}>
+          {curMsgs.length === 0 && !loading && (
+            <div style={{ textAlign:"center", padding:"40px 16px", color:"#a0907e" }}>
+              <div style={{ fontSize:"42px", marginBottom:"14px", opacity:0.6 }}>✏️</div>
+              <p style={{ fontSize:"14px", lineHeight:1.8, margin:0, whiteSpace:"pre-line" }}>
+                {selDate === todayKey ? "利用者様の様子を入力してください。\nAIが介護記録を自動作成します。\n\n🎤 マイクボタンで音声入力もできます" : "この日の記録はありません。"}
+              </p>
+            </div>
+          )}
+
+          {curMsgs.map((msg) => {
+            const isU = msg.role === "user";
+            const isEd = editId === msg.id;
+            return (
+              <div key={msg.id} style={{ display:"flex", gap:"10px", marginBottom:"20px", flexDirection: isU ? "row-reverse" : "row", alignItems:"flex-start" }}>
+                <div style={{ display:"flex", flexDirection:"column", alignItems:"center", flexShrink:0, minWidth:"40px" }}>
+                  <div style={{ width:"38px", height:"38px", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"18px", background: isU ? "linear-gradient(135deg,#7eb8c9,#5a9aad)" : "linear-gradient(135deg,#e8c9a8,#d4a574)", boxShadow:"0 2px 6px rgba(0,0,0,0.08)" }}>{isU ? "👤" : "✏️"}</div>
+                  <span style={{ fontSize:"9px", color:"#8a7a6a", marginTop:"3px" }}>{isU ? currentUser.displayName.split(" ")[0] : "AI"}</span>
+                </div>
+                <div style={{ maxWidth:"78%", minWidth:"100px" }}>
+                  <div style={{ fontSize:"10px", color:"#a09888", marginBottom:"3px", textAlign: isU ? "right" : "left" }}>
+                    {fmtDT(msg.timestamp)}{msg.editedAt ? " (編集済)" : ""}
+                  </div>
+                  <div style={{ background: isU ? "linear-gradient(135deg,#5a9aad,#4a8a9d)" : "#fff", color: isU ? "#fff" : "#4a3a2a", padding:"12px 14px", borderRadius: isU ? "18px 18px 4px 18px" : "18px 18px 18px 4px", boxShadow: isU ? "0 2px 10px rgba(90,154,173,0.2)" : "0 2px 10px rgba(180,160,140,0.12)", fontSize:"13px", lineHeight:1.75, whiteSpace:"pre-wrap", wordBreak:"break-word", border: isU ? "none" : "1px solid rgba(200,180,160,0.15)" }}>
+                    {!isU && isEd ? (
+                      <div>
+                        <textarea value={editBuf} onChange={(e) => setEditBuf(e.target.value)} style={{ width:"100%", minHeight:"180px", padding:"10px", borderRadius:"10px", border:"2px solid #c4956a", fontSize:"13px", lineHeight:1.75, resize:"vertical", outline:"none", fontFamily:"inherit", color:"#4a3a2a", background:"#faf7f3", boxSizing:"border-box" }}/>
+                        <div style={{ display:"flex", gap:"8px", justifyContent:"flex-end", marginTop:"8px" }}>
+                          <button onClick={() => { setEditId(null); setEditBuf(""); }} style={{ padding:"6px 14px", borderRadius:"8px", border:"1px solid #d0c4b4", background:"#fff", color:"#7a6a5a", fontSize:"12px", cursor:"pointer" }}>キャンセル</button>
+                          <button onClick={() => saveEdit(msg.id)} style={{ padding:"6px 14px", borderRadius:"8px", border:"none", background:"linear-gradient(135deg,#c4956a,#b07d52)", color:"#fff", fontSize:"12px", fontWeight:600, cursor:"pointer" }}>保存</button>
+                        </div>
+                      </div>
+                    ) : msg.text}
+                  </div>
+                  {!isU && !isEd && (
+                    <div style={{ display:"flex", gap:"4px", marginTop:"5px", paddingLeft:"2px" }}>
+                      <button onClick={() => startEdit(msg)} style={{ fontSize:"10px", color:"#a09080", background:"none", border:"none", cursor:"pointer", padding:"2px 6px" }}>✏️ 編集</button>
+                      <button onClick={() => { if(navigator.clipboard) navigator.clipboard.writeText(msg.text); }} style={{ fontSize:"10px", color:"#a09080", background:"none", border:"none", cursor:"pointer", padding:"2px 6px" }}>📋 コピー</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          {loading && (
+            <div style={{ display:"flex", gap:"10px", marginBottom:"20px", alignItems:"flex-start" }}>
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center", minWidth:"40px" }}>
+                <div style={{ width:"38px", height:"38px", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"18px", background:"linear-gradient(135deg,#e8c9a8,#d4a574)" }}>✏️</div>
+                <span style={{ fontSize:"9px", color:"#8a7a6a", marginTop:"3px" }}>AI</span>
+              </div>
+              <div style={{ background:"#fff", padding:"14px 18px", borderRadius:"18px 18px 18px 4px", boxShadow:"0 2px 10px rgba(180,160,140,0.12)", border:"1px solid rgba(200,180,160,0.15)", display:"flex", alignItems:"center", gap:"4px" }}>
+                <span style={{ fontSize:"12px", color:"#a09080", marginRight:"6px" }}>記録作成中...</span>
+                {[0,0.2,0.4].map((d,i) => <span key={i} style={{ display:"inline-block", width:"7px", height:"7px", borderRadius:"50%", background:"#c4956a", animation:"blink 1.2s ease-in-out " + d + "s infinite" }}/>)}
+              </div>
+            </div>
+          )}
+          <div ref={endRef}/>
+        </div>
+      </div>
+
+      {/* INPUT */}
+      {selDate === todayKey ? (
+        <div style={{ background:"rgba(255,255,255,0.95)", backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)", borderTop:"1px solid rgba(200,180,160,0.2)", padding:"10px 16px", paddingBottom:"max(10px, env(safe-area-inset-bottom))", flexShrink:0 }}>
+          <div style={{ maxWidth:"800px", margin:"0 auto" }}>
+            {isListening && (
+              <div style={{ background:"rgba(231,76,60,0.08)", borderRadius:"8px", padding:"7px 10px", marginBottom:"8px", fontSize:"11px", color:"#e74c3c", border:"1px solid rgba(231,76,60,0.2)", display:"flex", alignItems:"center", gap:"6px", flexWrap:"wrap" }}>
+                <span style={{ display:"inline-block", width:"8px", height:"8px", borderRadius:"50%", background:"#e74c3c", animation:"pulse 1s ease-in-out infinite", flexShrink:0 }}/>
+                <span>音声認識中... 話し終わると自動送信されます</span>
+                {interim && <span style={{ color:"#999" }}>({interim})</span>}
+              </div>
+            )}
+            <div style={{ display:"flex", gap:"8px", alignItems:"flex-end" }}>
+              <div style={{ flex:1, background:"#fff", borderRadius:"14px", border:"2px solid #e0d4c6", overflow:"hidden", boxShadow:"0 2px 6px rgba(180,160,140,0.08)" }}>
+                <textarea ref={taRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKey} placeholder="利用者様の様子を入力..." rows={1} style={{ width:"100%", padding:"12px 14px", border:"none", outline:"none", resize:"none", fontSize:"16px", lineHeight:1.5, fontFamily:"inherit", color:"#4a3a2a", background:"transparent", boxSizing:"border-box" }}/>
+              </div>
+              <button onClick={toggleListening} style={{ width:"44px", height:"44px", borderRadius:"50%", border:"none", background: isListening ? "linear-gradient(135deg,#e74c3c,#c0392b)" : "linear-gradient(135deg,#8e8e93,#636366)", color:"#fff", fontSize:"18px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, boxShadow: isListening ? "0 0 16px rgba(231,76,60,0.4)" : "0 2px 8px rgba(0,0,0,0.1)", animation: isListening ? "recording 1.5s ease-in-out infinite" : "none" }}>{isListening ? "⏹" : "🎤"}</button>
+              <button id="care-send-btn" onClick={doSend} disabled={!input.trim()||loading} style={{ width:"44px", height:"44px", borderRadius:"50%", border:"none", background: input.trim()&&!loading ? "linear-gradient(135deg,#c4956a,#b07d52)" : "#d8cfc4", color:"#fff", fontSize:"18px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, boxShadow: input.trim()&&!loading ? "0 2px 8px rgba(0,0,0,0.12)" : "none" }}>▲</button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div style={{ background:"rgba(255,255,255,0.8)", borderTop:"1px solid rgba(200,180,160,0.2)", padding:"14px 16px", paddingBottom:"max(14px, env(safe-area-inset-bottom))", textAlign:"center", color:"#a09080", fontSize:"12px", flexShrink:0 }}>過去の記録は閲覧のみです</div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<CareRecordAI/>);
+</script>
+</body>
+</html>

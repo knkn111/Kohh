@@ -13,6 +13,8 @@
   body { font-family:'Hiragino Sans','Noto Sans JP',sans-serif; background:linear-gradient(160deg,#fdf6ef 0%,#f7ede2 40%,#f0e6d8 100%); }
   input, textarea, button { font-family:inherit; -webkit-appearance:none; }
   @keyframes blink{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+  @keyframes recording{0%,100%{box-shadow:0 0 6px rgba(231,76,60,0.3)}50%{box-shadow:0 0 18px rgba(231,76,60,0.6)}}
 </style>
 </head>
 <body>
@@ -77,7 +79,7 @@ const genRecord = async (input, recName) => {
   ].join("\n");
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetch("/.netlify/functions/api", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -125,10 +127,16 @@ function CareRecordAI() {
   const [editId, setEditId] = useState(null);
   const [editBuf, setEditBuf] = useState("");
   const [showExport, setShowExport] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [interim, setInterim] = useState("");
 
   const endRef = useRef(null);
   const taRef = useRef(null);
   const expRef = useRef(null);
+  const recognitionRef = useRef(null);
+
+  // Chrome detection (Web Speech API works reliably on Chrome/Android)
+  const isChrome = useRef(/Chrome\//.test(navigator.userAgent) && !/Edge|OPR/.test(navigator.userAgent)).current;
 
   const todayKey = getDateKey(new Date());
   const tabs = [0,1,2].map((n) => {
@@ -152,6 +160,61 @@ function CareRecordAI() {
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
+
+  // Web Speech API (Chrome/Android only)
+  useEffect(() => {
+    if (!isChrome) return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    const rec = new SR();
+    rec.lang = "ja-JP";
+    rec.continuous = true;
+    rec.interimResults = true;
+    let finalText = "";
+    let timer = null;
+    rec.onresult = (event) => {
+      let fin = "", tmp = "";
+      for (let i = 0; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript;
+        if (event.results[i].isFinal) fin += t; else tmp += t;
+      }
+      if (fin) finalText = fin;
+      setInterim(tmp);
+      setInput(finalText + tmp);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { try { rec.stop(); } catch(e){} }, 2000);
+    };
+    rec.onend = () => {
+      setIsListening(false);
+      setInterim("");
+      if (timer) clearTimeout(timer);
+      if (finalText.trim()) {
+        setInput(finalText.trim());
+        setTimeout(() => document.dispatchEvent(new CustomEvent("voiceSend")), 150);
+      }
+      finalText = "";
+    };
+    rec.onerror = () => { setIsListening(false); setInterim(""); finalText = ""; };
+    recognitionRef.current = rec;
+    return () => { try { rec.abort(); } catch(e){} };
+  }, []);
+
+  // Auto-send after voice input
+  useEffect(() => {
+    const h = () => setTimeout(() => { const b = document.getElementById("care-send-btn"); if (b) b.click(); }, 200);
+    document.addEventListener("voiceSend", h);
+    return () => document.removeEventListener("voiceSend", h);
+  }, []);
+
+  const toggleListening = () => {
+    if (!recognitionRef.current) return;
+    if (isListening) {
+      try { recognitionRef.current.stop(); } catch(e){}
+    } else {
+      setInput(""); setInterim("");
+      try { recognitionRef.current.start(); setIsListening(true); } catch(e) { console.error(e); }
+    }
+  };
 
   const doLogin = () => {
     const found = USERS.find((u) => u.username === loginUser && u.password === loginPass);
@@ -287,7 +350,9 @@ function CareRecordAI() {
               <div style={{ fontSize:"42px", marginBottom:"14px", opacity:0.6 }}>✏️</div>
               <p style={{ fontSize:"14px", lineHeight:1.8, margin:0, whiteSpace:"pre-line" }}>
                 {selDate === todayKey
-                  ? "利用者様の様子を入力してください。\nAIが介護記録を自動作成します。\n\nキーボードの 🎤 で音声入力もできます"
+                  ? (isChrome
+                    ? "利用者様の様子を入力してください。\nAIが介護記録を自動作成します。\n\n🎤 ボタンで音声入力ができます"
+                    : "利用者様の様子を入力してください。\nAIが介護記録を自動作成します。\n\nキーボードの 🎤 で音声入力もできます")
                   : "この日の記録はありません。"}
               </p>
             </div>
@@ -348,10 +413,20 @@ function CareRecordAI() {
       {selDate === todayKey ? (
         <div style={{ background:"rgba(255,255,255,0.95)", backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)", borderTop:"1px solid rgba(200,180,160,0.2)", padding:"10px 16px", paddingBottom:"max(10px, env(safe-area-inset-bottom))", flexShrink:0 }}>
           <div style={{ maxWidth:"800px", margin:"0 auto" }}>
+            {isListening && (
+              <div style={{ background:"rgba(231,76,60,0.08)", borderRadius:"8px", padding:"7px 10px", marginBottom:"8px", fontSize:"11px", color:"#e74c3c", border:"1px solid rgba(231,76,60,0.2)", display:"flex", alignItems:"center", gap:"6px", flexWrap:"wrap" }}>
+                <span style={{ display:"inline-block", width:"8px", height:"8px", borderRadius:"50%", background:"#e74c3c", animation:"pulse 1s ease-in-out infinite", flexShrink:0 }}/>
+                <span>音声認識中... 話し終わると自動で記録を作成します</span>
+                {interim && <span style={{ color:"#999" }}>({interim})</span>}
+              </div>
+            )}
             <div style={{ display:"flex", gap:"8px", alignItems:"flex-end" }}>
               <div style={{ flex:1, background:"#fff", borderRadius:"14px", border:"2px solid #e0d4c6", overflow:"hidden", boxShadow:"0 2px 6px rgba(180,160,140,0.08)" }}>
-                <textarea ref={taRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKey} placeholder="利用者様の様子を入力（キーボード🎤で音声入力可）" rows={1} style={{ width:"100%", padding:"12px 14px", border:"none", outline:"none", resize:"none", fontSize:"16px", lineHeight:1.5, fontFamily:"inherit", color:"#4a3a2a", background:"transparent", boxSizing:"border-box" }}/>
+                <textarea ref={taRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKey} placeholder={isChrome ? "利用者様の様子を入力 or 🎤で音声入力" : "利用者様の様子を入力（キーボード🎤で音声入力可）"} rows={1} style={{ width:"100%", padding:"12px 14px", border:"none", outline:"none", resize:"none", fontSize:"16px", lineHeight:1.5, fontFamily:"inherit", color:"#4a3a2a", background:"transparent", boxSizing:"border-box" }}/>
               </div>
+              {isChrome && (
+                <button onClick={toggleListening} style={{ width:"44px", height:"44px", borderRadius:"50%", border:"none", background: isListening ? "linear-gradient(135deg,#e74c3c,#c0392b)" : "linear-gradient(135deg,#8e8e93,#636366)", color:"#fff", fontSize:"18px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, boxShadow: isListening ? "0 0 16px rgba(231,76,60,0.4)" : "0 2px 8px rgba(0,0,0,0.1)", animation: isListening ? "recording 1.5s ease-in-out infinite" : "none" }}>{isListening ? "⏹" : "🎤"}</button>
+              )}
               <button id="care-send-btn" onClick={doSend} disabled={!input.trim()||loading} style={{ width:"44px", height:"44px", borderRadius:"50%", border:"none", background: input.trim()&&!loading ? "linear-gradient(135deg,#c4956a,#b07d52)" : "#d8cfc4", color:"#fff", fontSize:"18px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, boxShadow: input.trim()&&!loading ? "0 2px 8px rgba(0,0,0,0.12)" : "none" }}>▲</button>
             </div>
           </div>
